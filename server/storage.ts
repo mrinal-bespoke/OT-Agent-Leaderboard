@@ -5,6 +5,72 @@ import { eq } from "drizzle-orm";
 
 export type EvalSelectionMode = 'oldest' | 'latest' | 'highest' | 'all';
 
+/** Rows per Supabase request. Kept at PostgREST's usual default max-rows. */
+const PAGE_SIZE = 1000;
+
+/**
+ * Pages are read STRICTLY SEQUENTIALLY. Do not parallelise this.
+ *
+ * The view is expensive enough that concurrent reads contend and push each
+ * other past the statement timeout. Measured against production: 3 pages at
+ * concurrency 1 all succeeded, at concurrency 2 one returned 500, and at
+ * concurrency 3 all three did. Parallelism makes this endpoint fail, not
+ * faster.
+ */
+
+/**
+ * Fetch every row of a table/view in bounded pages.
+ *
+ * A single unbounded select() on `leaderboard_results` (~9k rows through a
+ * multi-join view) exceeds Postgres' statement timeout and returns 57014,
+ * which surfaces as a 500 on the only endpoint the UI calls — i.e. the whole
+ * leaderboard goes blank. Measured: unbounded 9.3s → timeout, while any single
+ * 1000-row page returns in 2.6–6.6s.
+ *
+ * Paging also stops PostgREST's default max-rows cap from silently TRUNCATING
+ * a large table. That failure reports no error at all, it just drops rows off
+ * the end, so it would show up as quietly missing leaderboard entries.
+ *
+ * Pages are read concurrently because sequentially they total ~30s, which is
+ * slow enough to risk a gateway timeout in front of the app.
+ *
+ * `orderColumn` must be unique. Without a stable total order, rows can shift
+ * between requests and pages will overlap or skip.
+ */
+async function fetchAllPaged<T>(
+  table: string,
+  columns: string,
+  orderColumn: string,
+): Promise<T[]> {
+  const fetchPage = async (from: number): Promise<T[]> => {
+    const { data, error } = await supabase
+      .from(table)
+      .select(columns)
+      .order(orderColumn, { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+
+    if (error) {
+      console.error(`Error fetching ${table} rows ${from}-${from + PAGE_SIZE - 1}:`, error);
+      throw error;
+    }
+
+    return (data ?? []) as unknown as T[];
+  };
+
+  // No up-front count: `count: 'exact'` has to compute the whole view and
+  // times out exactly like the unbounded select it replaced. Instead read
+  // until a page comes back short, which can only happen at the end.
+  const rows: T[] = [];
+
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const batch = await fetchPage(from);
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+  }
+
+  return rows;
+}
+
 export interface BenchmarkResultExtended extends BenchmarkResult {
   hfTracesLink?: string;
   endedAt?: string;
@@ -205,16 +271,7 @@ export class DbStorage implements IStorage {
    * Fetch all raw rows from the leaderboard_results view (no deduplication).
    */
   private async fetchAllRawRows(): Promise<RawLeaderboardRow[]> {
-    const { data, error } = await supabase
-      .from('leaderboard_results')
-      .select('*');
-
-    if (error) {
-      console.error('Error fetching leaderboard results:', error);
-      throw error;
-    }
-
-    return (data ?? []) as RawLeaderboardRow[];
+    return fetchAllPaged<RawLeaderboardRow>('leaderboard_results', '*', 'id');
   }
 
   /**
@@ -504,27 +561,30 @@ export class DbStorage implements IStorage {
   async getAllModels(): Promise<ModelInfo[]> {
     // Two separate queries — PostgREST can't resolve models→agents FK
     // due to unnamed constraint + multiple self-referencing FKs on models table
-    const { data: modelsData, error: modelsError } = await supabase
-      .from('models')
-      .select('id, name, agent_id, base_model_id, duplicate_of, creation_time, training_type, model_size_b');
+    const modelsData = await fetchAllPaged<{
+      id: string;
+      name: string;
+      agent_id: string | null;
+      base_model_id: string | null;
+      duplicate_of: string | null;
+      creation_time: string | null;
+      training_type: string | null;
+      model_size_b: number | null;
+    }>(
+      'models',
+      'id, name, agent_id, base_model_id, duplicate_of, creation_time, training_type, model_size_b',
+      'id',
+    );
 
-    if (modelsError) {
-      console.error('Error fetching models:', modelsError);
-      throw modelsError;
-    }
-
-    if (!modelsData) {
+    if (modelsData.length === 0) {
       return [];
     }
 
-    const { data: agentsData, error: agentsError } = await supabase
-      .from('agents')
-      .select('id, name');
-
-    if (agentsError) {
-      console.error('Error fetching agents:', agentsError);
-      throw agentsError;
-    }
+    const agentsData = await fetchAllPaged<{ id: string; name: string }>(
+      'agents',
+      'id, name',
+      'id',
+    );
 
     // Build agent lookup map: agent_id -> agent_name
     const agentMap = new Map<string, string>();
