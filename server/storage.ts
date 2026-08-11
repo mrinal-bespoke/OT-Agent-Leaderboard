@@ -9,16 +9,6 @@ export type EvalSelectionMode = 'oldest' | 'latest' | 'highest' | 'all';
 const PAGE_SIZE = 1000;
 
 /**
- * Pages are read STRICTLY SEQUENTIALLY. Do not parallelise this.
- *
- * The view is expensive enough that concurrent reads contend and push each
- * other past the statement timeout. Measured against production: 3 pages at
- * concurrency 1 all succeeded, at concurrency 2 one returned 500, and at
- * concurrency 3 all three did. Parallelism makes this endpoint fail, not
- * faster.
- */
-
-/**
  * Fetch every row of a table/view in bounded pages.
  *
  * A single unbounded select() on `leaderboard_results` (~9k rows through a
@@ -31,8 +21,13 @@ const PAGE_SIZE = 1000;
  * a large table. That failure reports no error at all, it just drops rows off
  * the end, so it would show up as quietly missing leaderboard entries.
  *
- * Pages are read concurrently because sequentially they total ~30s, which is
- * slow enough to risk a gateway timeout in front of the app.
+ * Pages are read STRICTLY SEQUENTIALLY. Do not parallelise this. The view is
+ * expensive enough that concurrent reads contend and push each other past the
+ * statement timeout — measured against production, 3 pages at concurrency 1
+ * all succeeded, at concurrency 2 one returned 500, and at concurrency 3 all
+ * three did. Parallelism makes this endpoint fail, not faster. The resulting
+ * ~59s full read is why callers go through the cache below rather than
+ * invoking this per request.
  *
  * `orderColumn` must be unique. Without a stable total order, rows can shift
  * between requests and pages will overlap or skip.
@@ -266,12 +261,65 @@ export interface IStorage {
   deleteBenchmarkResult(id: string): Promise<void>;
 }
 
+/** How long cached raw rows are served before a refresh is triggered. */
+const RAW_ROWS_TTL_MS = 5 * 60 * 1000;
+
+let rawRowsCache: { rows: RawLeaderboardRow[]; fetchedAt: number } | null = null;
+let rawRowsInflight: Promise<RawLeaderboardRow[]> | null = null;
+
+/**
+ * Load every leaderboard row, coalescing concurrent callers onto one read.
+ *
+ * Single-flight is REQUIRED here, not an optimisation. A full paged read takes
+ * ~59s, so without coalescing two overlapping requests would run two paged
+ * reads at once -- and concurrent reads of this view push each other past the
+ * statement timeout (measured: at concurrency 2, one of three pages 500s). Two
+ * simultaneous visitors would take the leaderboard down.
+ */
+function loadRawRows(): Promise<RawLeaderboardRow[]> {
+  if (rawRowsInflight) return rawRowsInflight;
+
+  const load = fetchAllPaged<RawLeaderboardRow>('leaderboard_results', '*', 'id')
+    .then((rows) => {
+      rawRowsCache = { rows, fetchedAt: Date.now() };
+      return rows;
+    })
+    .finally(() => {
+      rawRowsInflight = null;
+    });
+
+  rawRowsInflight = load;
+  return load;
+}
+
+/**
+ * Warm the row cache. Called at startup so the first visitor doesn't pay the
+ * ~59s read (long enough that a proxy in front of the app may kill the request
+ * before it returns, leaving the page blank even though the query succeeded).
+ */
+export async function warmLeaderboardCache(): Promise<void> {
+  await loadRawRows();
+}
+
 export class DbStorage implements IStorage {
   /**
    * Fetch all raw rows from the leaderboard_results view (no deduplication).
+   *
+   * Serves cache when present. A stale entry is returned immediately and
+   * refreshed in the background, so a visitor never waits on the slow read
+   * once the cache is warm.
    */
   private async fetchAllRawRows(): Promise<RawLeaderboardRow[]> {
-    return fetchAllPaged<RawLeaderboardRow>('leaderboard_results', '*', 'id');
+    if (!rawRowsCache) return loadRawRows();
+
+    if (Date.now() - rawRowsCache.fetchedAt > RAW_ROWS_TTL_MS) {
+      // Refresh behind the current response; failures keep the stale rows.
+      void loadRawRows().catch((error) => {
+        console.error('Background leaderboard refresh failed; serving stale rows:', error);
+      });
+    }
+
+    return rawRowsCache.rows;
   }
 
   /**

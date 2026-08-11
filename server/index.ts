@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express, { NextFunction, type Request, Response } from "express";
 import { registerRoutes } from "./routes";
+import { warmLeaderboardCache } from "./storage";
 import { log, serveStatic, setupVite } from "./vite";
 
 const app = express();
@@ -65,5 +66,13 @@ app.use((req, res, next) => {
   const host = process.env.HOST || "0.0.0.0"; // Use 0.0.0.0 to allow proxy access in Replit
   server.listen(port, host, () => {
     log(`serving on ${host}:${port}`);
+
+    // Start the slow leaderboard read now rather than on the first request.
+    // Deliberately not awaited: the port must be listening immediately, and a
+    // failure here only means the first visitor pays the read as before.
+    const warmStart = Date.now();
+    warmLeaderboardCache()
+      .then(() => log(`leaderboard cache warmed in ${Date.now() - warmStart}ms`))
+      .catch((error) => log(`leaderboard cache warm failed: ${error}`));
   });
 })();
