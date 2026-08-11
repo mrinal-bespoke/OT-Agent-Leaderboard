@@ -647,7 +647,11 @@ export class DbStorage implements IStorage {
     }
 
     return modelsData
-      .filter(row => agentMap.has(row.agent_id))
+      // agent_id is nullable in the DB. A null never matched agentMap and so
+      // was already dropped here; the predicate just makes that visible to the
+      // type checker instead of relying on an implicit any.
+      .filter((row): row is typeof row & { agent_id: string } =>
+        row.agent_id !== null && agentMap.has(row.agent_id))
       .map(row => {
         const agentName = agentMap.get(row.agent_id)!;
 
