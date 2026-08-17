@@ -2,6 +2,7 @@ import { type BenchmarkResult, type InsertBenchmarkResult } from "@shared/schema
 import { supabase } from "@db";
 import { benchmarkResults } from "@shared/schema";
 import { eq } from "drizzle-orm";
+import { fetchRawRowsFromBaseTables } from "./base-tables-source";
 
 export type EvalSelectionMode = 'oldest' | 'latest' | 'highest' | 'all';
 
@@ -261,6 +262,24 @@ export interface IStorage {
   deleteBenchmarkResult(id: string): Promise<void>;
 }
 
+/**
+ * Where leaderboard rows come from.
+ *
+ *   view        -- read leaderboard_results directly (the intended path)
+ *   base_tables -- read sandbox_jobs/models/agents/benchmarks and rebuild the
+ *                  view's rows in memory
+ *
+ * base_tables is a TEMPORARY fallback for as long as the deployed view defines
+ * its id as gen_random_uuid(). With no stable key the view cannot be paged --
+ * reads sample randomly, losing ~35% of rows and changing between refreshes --
+ * and it is not fixable from the client. The base tables have real primary
+ * keys, so they page correctly.
+ *
+ * Once create_leaderboard_view.sql is applied, set this back to `view` and
+ * remove base-tables-source.ts.
+ */
+const LEADERBOARD_DATA_SOURCE = process.env.LEADERBOARD_DATA_SOURCE === 'base_tables' ? 'base_tables' : 'view';
+
 /** How long cached raw rows are served before a refresh is triggered. */
 const RAW_ROWS_TTL_MS = 5 * 60 * 1000;
 
@@ -279,7 +298,12 @@ let rawRowsInflight: Promise<RawLeaderboardRow[]> | null = null;
 function loadRawRows(): Promise<RawLeaderboardRow[]> {
   if (rawRowsInflight) return rawRowsInflight;
 
-  const load = fetchAllPaged<RawLeaderboardRow>('leaderboard_results', '*', 'id')
+  const source =
+    LEADERBOARD_DATA_SOURCE === 'base_tables'
+      ? fetchRawRowsFromBaseTables() as Promise<RawLeaderboardRow[]>
+      : fetchAllPaged<RawLeaderboardRow>('leaderboard_results', '*', 'id');
+
+  const load = source
     .then((rows) => {
       rawRowsCache = { rows, fetchedAt: Date.now() };
       return rows;
