@@ -40,7 +40,14 @@ all_jobs AS (
   SELECT * FROM pending_started_jobs
 )
 SELECT
-  gen_random_uuid()::text as id,
+  -- STABLE row identity: the underlying sandbox_jobs id, one row per job.
+  --
+  -- This was gen_random_uuid(), which re-randomised on every evaluation of the
+  -- view. Any keyset or LIMIT/OFFSET paging that ordered by it sampled rows at
+  -- random instead of paging: requesting page 0 twice returned only 15/300
+  -- rows in common, and a full paged read produced 9,204 rows containing just
+  -- 5,950 distinct ones. It also made client-side React keys unstable.
+  aj.id::text as id,
   m.id as model_id,
   m.name as model_name,
   m.duplicate_of as model_duplicate_of,
@@ -92,8 +99,9 @@ LEFT JOIN models m_canonical ON m.duplicate_of = m_canonical.id
 LEFT JOIN models bm_via_canonical ON m_canonical.base_model_id = bm_via_canonical.id
 LEFT JOIN models bm_canonical ON bm.duplicate_of = bm_canonical.id
 LEFT JOIN models bm_via_canonical_canonical ON bm_via_canonical.duplicate_of = bm_via_canonical_canonical.id
-LEFT JOIN benchmarks b_canonical ON b.duplicate_of = b_canonical.id
-ORDER BY a.name, m.name, COALESCE(b_canonical.name, b.name), aj.job_timestamp;
+LEFT JOIN benchmarks b_canonical ON b.duplicate_of = b_canonical.id;
+-- No ORDER BY in the view: it forces a full sort on every read, including
+-- paged reads that immediately re-sort by their own key. Consumers order.
 
 -- Grant read access to the view
 -- Adjust the role name based on your Supabase setup
