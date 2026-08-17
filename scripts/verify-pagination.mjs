@@ -51,13 +51,27 @@ async function sourceRowCount() {
 }
 
 /**
- * Identify a row by its CONTENT, never by the `id` column.
+ * Row identity for duplicate detection.
  *
- * Checking uniqueness on `id` is what let the original bug through: when ids
- * are random they are unique by construction, so such a check can never fail
- * no matter how badly the paging repeats or drops rows.
+ * Uses `id`, but ONLY because check 2 below proves ids are stable across
+ * requests first. That ordering matters: uniqueness of a random id is
+ * meaningless (random values are unique by construction), which is exactly how
+ * the original bug survived review. Once identity is proven stable, it is the
+ * underlying sandbox_jobs primary key and is the correct thing to dedupe on.
+ */
+const rowId = (r) => String(r.id);
+
+/**
+ * Content-based identity, used only as a cross-check.
+ *
+ * NOT unique: sandbox_jobs holds 75 rows sharing
+ * (model, benchmark, agent, ended_at) -- mostly Pending jobs with a null
+ * ended_at. The view's COALESCE(ended_at, created_at) resolves most of them,
+ * leaving 4 genuine collisions. So a CORRECT full read still shows a handful
+ * of content-key repeats; that is data, not a paging fault.
  */
 const rowKey = (r) => [r.model_id, r.source_benchmark_id, r.agent_id, r.ended_at].join('|');
+const EXPECTED_CONTENT_COLLISIONS = 4;
 
 let failed = false;
 const check = (ok, label, detail) => {
@@ -91,22 +105,32 @@ console.log('\n2. Are ids actually unique and non-random?');
 console.log('\n3. Does a full paged read cover every row exactly once?');
 {
   const total = await sourceRowCount();
-  const seen = [];
+  const rows = [];
   for (let from = 0; ; from += PAGE_SIZE) {
     const batch = await page(from, from + PAGE_SIZE - 1);
-    seen.push(...batch.map(rowKey));
+    rows.push(...batch);
     if (batch.length < PAGE_SIZE) break;
   }
-  const unique = new Set(seen).size;
-  const dupes = seen.length - unique;
+  const ids = rows.map(rowId);
+  const uniqueIds = new Set(ids).size;
+  const dupes = ids.length - uniqueIds;
+  const contentDupes = rows.length - new Set(rows.map(rowKey)).size;
+
   console.log(`  source rows (sandbox_jobs): ${total}`);
-  console.log(`  fetched: ${seen.length}   distinct: ${unique}   duplicates: ${dupes}`);
-  check(dupes === 0, 'no duplicated rows across pages', `${dupes} duplicates`);
+  console.log(`  fetched: ${rows.length}   distinct ids: ${uniqueIds}   duplicate ids: ${dupes}`);
+  console.log(`  content-key repeats: ${contentDupes} (up to ${EXPECTED_CONTENT_COLLISIONS} expected -- genuine data)`);
+
+  check(dupes === 0, 'no row fetched twice', `${dupes} duplicate ids`);
   // Rows can legitimately be dropped by the view's INNER JOINs (a job whose
   // model/agent/benchmark row is missing), so allow <= but never >.
-  check(unique <= total, 'distinct rows do not exceed the source table');
-  const coverage = total ? ((unique / total) * 100).toFixed(1) : '0';
-  check(unique >= total * 0.95, `coverage is complete`, `${coverage}% of source rows (was ~65% when broken)`);
+  check(uniqueIds <= total, 'distinct rows do not exceed the source table');
+  const coverage = total ? ((uniqueIds / total) * 100).toFixed(1) : '0';
+  check(uniqueIds >= total * 0.95, 'coverage is complete', `${coverage}% of source rows (was ~65% when broken)`);
+  check(
+    contentDupes <= EXPECTED_CONTENT_COLLISIONS,
+    'content-key repeats within the known-collision budget',
+    `${contentDupes} seen`,
+  );
 }
 
 console.log(failed ? '\nFAILED -- paging is unsound; do not trust the leaderboard.\n' : '\nAll checks passed.\n');

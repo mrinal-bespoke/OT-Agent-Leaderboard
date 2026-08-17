@@ -1,5 +1,13 @@
 -- Views for the NON-AGENTIC (standard) eval leaderboard tabs.
--- Run this in Supabase SQL Editor AFTER create_leaderboard_view.sql.
+--
+-- ORDER MATTERS. Run this in the Supabase SQL Editor AFTER
+-- create_leaderboard_view.sql, and RE-RUN IT EVERY TIME that file is applied.
+--
+-- These views select FROM leaderboard_results, and create_leaderboard_view.sql
+-- begins with `DROP VIEW IF EXISTS leaderboard_results CASCADE`. CASCADE drops
+-- dependants, so re-applying the base view silently deletes both views below.
+-- Nothing errors -- the tabs just start returning "relation does not exist".
+-- This file is idempotent, so re-running it is always safe.
 --
 -- Report templates come from the Marin Eval Policy
 -- (marin-community/marin#7958), which defines three:
