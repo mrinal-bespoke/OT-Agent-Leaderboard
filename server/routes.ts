@@ -353,11 +353,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
 
       // Convert to array and sort by model name, then agent name
-      const pivotedData = Array.from(groupedData.values()).sort((a, b) => {
+      let pivotedData = Array.from(groupedData.values()).sort((a, b) => {
         const modelCompare = a.modelName.localeCompare(b.modelName);
         if (modelCompare !== 0) return modelCompare;
         return a.agentName.localeCompare(b.agentName);
       });
+
+      // On a standard-eval tab, drop models with no result in THIS family.
+      //
+      // The pivot emits one row per (model, agent) whether or not that model
+      // has a score in the selected family, so without this the Math tab
+      // renders every model in the registry with all cells blank -- 1,358 empty
+      // rows against 0 real ones.
+      //
+      // Deliberately NOT applied to agentic: that board shows models with no
+      // eval on purpose (the isNoEval flag and the "Missing Eval" tab depend on
+      // them), so filtering there would remove a feature.
+      if (family !== 'agentic') {
+        pivotedData = pivotedData.filter(row => Object.keys(row.benchmarks || {}).length > 0);
+      }
 
       res.json(pivotedData);
     } catch (error) {
