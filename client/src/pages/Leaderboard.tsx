@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { RefreshCw, Info, ExternalLink, AlertCircle, Loader2 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
-import type { BenchmarkFamily } from '@shared/benchmark-families';
+
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -14,6 +14,18 @@ import ViewModeControls from '@/components/ViewModeControls';
 import ThemeToggle from '@/components/ThemeToggle';
 import { DEFAULT_VISIBLE_BENCHMARKS, OOD_BENCHMARKS, CORE_BENCHMARKS, compareBenchmarks } from '@/config/benchmarkConfig';
 import { BLACKLISTED_MODELS } from '@/config/blacklistedModels';
+
+/**
+ * Mirrors BenchmarkFamily in shared/benchmark-families.ts, which is the source
+ * of truth for family membership.
+ *
+ * Declared locally rather than imported: Vite runs with root=client/ and
+ * fs.strict, and no client module has ever imported from @shared, so pulling a
+ * module in from outside the root is a resolution risk for a bare string union
+ * that costs nothing to restate. The server still owns which benchmarks belong
+ * to which family -- this is only the tab identifier sent as a query param.
+ */
+type BenchmarkFamily = 'agentic' | 'math' | 'nlp';
 
 type EvalSelectionMode = 'oldest' | 'latest' | 'highest' | 'all';
 
