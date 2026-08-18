@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { RefreshCw, Info, ExternalLink, AlertCircle, Loader2 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
+import type { BenchmarkFamily } from '@shared/benchmark-families';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -214,6 +215,11 @@ const SCALING_SECTION_BY_MODEL: Record<string, string> = SCALING_SECTIONS.reduce
 
 export default function Leaderboard() {
   const [selectionMode, setSelectionMode] = useState<EvalSelectionMode>('all');
+  // Which report template is shown: agentic (default), math or nlp. The server
+  // filters by family BEFORE dedup, so switching this re-fetches rather than
+  // filtering client-side -- selection and improvement must be computed within
+  // the family, not across it.
+  const [family, setFamily] = useState<BenchmarkFamily>('agentic');
   const [activeTab, setActiveTab] = useState<'filtered' | 'all' | 'blacklisted' | 'base' | 'active' | 'a1' | 'b1' | 'c1' | 'd1' | 'e1' | 'f1' | 'g1' | 'ood' | 'war' | 'table1' | 'scaling' | 'rl8b' | 'baselineData' | 'missingEval' | 'guardrail'>('all');
   const [topN, setTopN] = useState<number>(50);
   const [recentlyAddedN, setRecentlyAddedN] = useState<number>(50);
@@ -240,7 +246,7 @@ export default function Leaderboard() {
 
   // Always fetch improvement metrics data (query key includes mode for per-mode caching)
   const { data: pivotedData = [], isLoading, isFetching, refetch } = useQuery<PivotedLeaderboardRowWithImprovement[]>({
-    queryKey: [`/api/leaderboard-pivoted-with-improvement?mode=${selectionMode}&hideNoTraceLink=${hideNoTraceLink}`],
+    queryKey: [`/api/leaderboard-pivoted-with-improvement?mode=${selectionMode}&hideNoTraceLink=${hideNoTraceLink}&family=${family}`],
   });
 
   const handleRefresh = () => {
@@ -568,6 +574,29 @@ export default function Leaderboard() {
       </header>
 
       <main className="px-3 sm:px-6 lg:px-8 py-4 sm:py-8">
+        {/* Report template: Agentic / Math / NLP (Marin Eval Policy #7958) */}
+        <div className="flex flex-wrap items-center gap-2 sm:gap-4 mb-4">
+          <span className="text-sm font-medium text-foreground">Benchmarks:</span>
+          <ToggleGroup
+            type="single"
+            value={family}
+            onValueChange={(value) => { if (value) setFamily(value as BenchmarkFamily); }}
+            variant="outline"
+            size="sm"
+          >
+            <ToggleGroupItem value="agentic" data-testid="family-agentic">Agentic</ToggleGroupItem>
+            <ToggleGroupItem value="math" data-testid="family-math">Math</ToggleGroupItem>
+            <ToggleGroupItem value="nlp" data-testid="family-nlp">NLP</ToggleGroupItem>
+          </ToggleGroup>
+          <span className="hidden sm:inline text-xs text-muted-foreground max-w-md">
+            {family === 'agentic'
+              ? 'SWE-bench, dev_set_v2, terminal_bench_2 and other agentic evals.'
+              : family === 'math'
+                ? 'MATH500, AIME24, gsm8k. Empty until non-agentic results are imported.'
+                : 'MMLU, HellaSwag, ARC, PIQA and the rest of the lm-eval suite. Empty until non-agentic results are imported.'}
+          </span>
+        </div>
+
         {/* Eval Selection Mode */}
         <div className="flex flex-wrap items-center gap-2 sm:gap-4 mb-4 sm:mb-6">
           <span className="text-sm font-medium text-foreground">Result Selection:</span>

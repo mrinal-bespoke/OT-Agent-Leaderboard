@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage, type EvalSelectionMode } from "./storage";
+import { parseFamily } from "@shared/benchmark-families";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Get all benchmark results
@@ -96,7 +97,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         : 'oldest';
 
       const hideNoTraceLink = req.query.hideNoTraceLink === 'true';
-      const results = await storage.getAllBenchmarkResultsWithImprovement(mode, hideNoTraceLink);
+      // Which leaderboard tab: agentic (default), math or nlp. Defaulting to
+      // agentic keeps every existing caller byte-identical.
+      const family = parseFamily(req.query.family);
+      const results = await storage.getAllBenchmarkResultsWithImprovement(mode, hideNoTraceLink, family);
 
       // Group by (model, agent) combination
       const groupedData = new Map<string, {

@@ -3,6 +3,7 @@ import { supabase } from "@db";
 import { benchmarkResults } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { fetchRawRowsFromBaseTables } from "./base-tables-source";
+import { inFamily, type BenchmarkFamily } from "@shared/benchmark-families";
 
 export type EvalSelectionMode = 'oldest' | 'latest' | 'highest' | 'all';
 
@@ -426,8 +427,13 @@ export class DbStorage implements IStorage {
     return result;
   }
 
-  async getAllBenchmarkResultsWithImprovement(mode: EvalSelectionMode = 'oldest', hideNoTraceLink: boolean = false): Promise<BenchmarkResultWithImprovement[]> {
+  async getAllBenchmarkResultsWithImprovement(mode: EvalSelectionMode = 'oldest', hideNoTraceLink: boolean = false, family: BenchmarkFamily = 'agentic'): Promise<BenchmarkResultWithImprovement[]> {
     let allRows = await this.fetchAllRawRows();
+
+    // Restrict to one tab's benchmarks BEFORE pools are built, so selection,
+    // dedup and improvement are all computed within the family. Filtering
+    // afterwards would let a math result win an agentic group and disappear.
+    allRows = allRows.filter(row => inFamily(row.canonical_benchmark_name, family));
 
     // Filter out rows without trace links before pool building
     if (hideNoTraceLink) {

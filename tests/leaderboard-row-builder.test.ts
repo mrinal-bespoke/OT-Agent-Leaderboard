@@ -13,6 +13,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildRawRows, type JobRow, type ModelRow, type NamedRow } from '../server/leaderboard-row-builder';
+import { inFamily, parseFamily } from '../shared/benchmark-families';
 
 const agent = (id: string, name: string, duplicate_of: string | null = null): NamedRow => ({ id, name, duplicate_of });
 const bench = agent;
@@ -247,4 +248,40 @@ test('is_overlong defaults to false, matching the view COALESCE', () => {
 test('training type comes from the model', () => {
   const { rows } = build([job('j')], { models: [model('m1', 'sft', { training_type: 'SFT' })] });
   assert.equal(rows[0].training_type, 'SFT');
+});
+
+// --- benchmark family routing (Agentic / Math / NLP tabs) ---
+
+test('math and nlp benchmarks route to their own families', () => {
+  for (const b of ['MATH500', 'AIME24', 'gsm8k']) {
+    assert.equal(inFamily(b, 'math'), true, `${b} should be math`);
+    assert.equal(inFamily(b, 'agentic'), false, `${b} must not leak into agentic`);
+    assert.equal(inFamily(b, 'nlp'), false);
+  }
+  for (const b of ['mmlu', 'hellaswag', 'arc_challenge', 'drop']) {
+    assert.equal(inFamily(b, 'nlp'), true, `${b} should be nlp`);
+    assert.equal(inFamily(b, 'agentic'), false, `${b} must not leak into agentic`);
+  }
+});
+
+test('agentic is defined by exclusion, so new agentic benchmarks appear automatically', () => {
+  for (const b of ['terminal_bench_2', 'dev_set_v2', 'swebench-verified', 'some-brand-new-agentic-set']) {
+    assert.equal(inFamily(b, 'agentic'), true, `${b} should be agentic`);
+    assert.equal(inFamily(b, 'math'), false);
+  }
+});
+
+test('an unregistered standard benchmark falls into agentic, not nowhere', () => {
+  // Documents the known trade-off: a misspelled standard benchmark is visible
+  // in the wrong tab rather than silently invisible everywhere.
+  assert.equal(inFamily('MATH-500', 'math'), false, 'wrong spelling is not math');
+  assert.equal(inFamily('MATH-500', 'agentic'), true, 'but it still shows up somewhere');
+});
+
+test('parseFamily defaults to agentic for junk input', () => {
+  assert.equal(parseFamily('math'), 'math');
+  assert.equal(parseFamily('nlp'), 'nlp');
+  for (const junk of [undefined, null, '', 'AGENTIC', 'sql-injection', 42]) {
+    assert.equal(parseFamily(junk), 'agentic');
+  }
 });
