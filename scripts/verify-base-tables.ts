@@ -41,7 +41,7 @@ const CORRECTED_TB2 = {
   trace: 'laion/glm47-fixthink-tb2-terminus2-harbor-e0e80550-traces',
 };
 const EXPECTED = {
-  dev_set_v2: 22.18,
+  dev_set_v2: 23.31,
   'swebench-verified-random-100-folders': 36.0,
   terminal_bench_2: 10.86,
 };
@@ -100,22 +100,24 @@ console.log('\n3. Known-good values (the row that exposed the bug)');
     );
   }
 
-  const correctedTb2 = mine.find((row) => row.id === CORRECTED_TB2.id);
-  if (correctedTb2) {
+  for (const corrected of [CORRECTED_DEV, CORRECTED_TB2]) {
+    const correctedRow = mine.find((row) => row.id === corrected.id);
+    if (!correctedRow) continue;
+
     const pool = mine.filter((row) =>
-      row.model_id === correctedTb2.model_id &&
-      row.canonical_agent_id === correctedTb2.canonical_agent_id &&
-      row.benchmark_name === correctedTb2.benchmark_name
+      row.model_id === correctedRow.model_id &&
+      row.canonical_agent_id === correctedRow.canonical_agent_id &&
+      row.benchmark_name === correctedRow.benchmark_name
     );
     check(
-      selectPool(pool, 'latest')[0]?.row.id === CORRECTED_TB2.id,
-      'Latest selects the corrected TB2 job even though its score ties the old row',
+      selectPool(pool, 'latest')[0]?.row.id === corrected.id,
+      `Latest selects the corrected ${corrected.benchmark} job`,
       selectPool(pool, 'latest')[0]?.row.id ?? 'no selection',
     );
     check(
-      selectPool(pool, 'all').some(({ row }) => row.id === CORRECTED_TB2.id),
-      'All includes the corrected TB2 job',
-      `${pool.length} TB2 rows in pool`,
+      selectPool(pool, 'all').some(({ row }) => row.id === corrected.id),
+      `All includes the corrected ${corrected.benchmark} job`,
+      `${pool.length} rows in pool`,
     );
   }
 }
