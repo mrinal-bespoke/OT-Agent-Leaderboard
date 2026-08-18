@@ -30,8 +30,7 @@ import {
   type NamedRow,
   type RawLeaderboardRow,
 } from './leaderboard-row-builder';
-
-const PAGE_SIZE = 1000;
+import { fetchAllKeysetPages } from './keyset-pagination';
 
 const JOB_COLUMNS =
   'id, model_id, agent_id, benchmark_id, metrics, ended_at, started_at, created_at, ' +
@@ -40,36 +39,38 @@ const MODEL_COLUMNS = 'id, name, duplicate_of, base_model_id, agent_id, creation
 const NAMED_COLUMNS = 'id, name, duplicate_of';
 
 /**
- * Page a plain table by its primary key.
+ * Page a plain table by its stored primary key.
  *
  * Ordering by `id` is what makes this sound: it is a real unique column, so
- * LIMIT/OFFSET walks a total order and visits every row exactly once. That is
- * precisely the property leaderboard_results lacks.
+ * A UUID default is generated once when the row is inserted; unlike the
+ * leaderboard_results view's gen_random_uuid(), it is persisted and stable
+ * across queries. The `id > last_id` cursor also avoids OFFSET's growing scan
+ * cost, which timed out on sandbox_jobs at rows 4000-4999 in production.
  *
  * Sequential by design -- concurrent reads against this database contend and
  * push each other past the statement timeout.
  */
-async function pageTable<T>(table: string, columns: string): Promise<T[]> {
-  const rows: T[] = [];
-
-  for (let from = 0; ; from += PAGE_SIZE) {
-    const { data, error } = await supabase
+async function pageTable<T extends { id: string }>(table: string, columns: string): Promise<T[]> {
+  return fetchAllKeysetPages<T>(async (afterId, limit) => {
+    let query = supabase
       .from(table)
       .select(columns)
       .order('id', { ascending: true })
-      .range(from, from + PAGE_SIZE - 1);
+      .limit(limit);
+
+    if (afterId !== null) {
+      query = query.gt('id', afterId);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
-      console.error(`[base-tables] ${table} rows ${from}-${from + PAGE_SIZE - 1} failed:`, error);
+      console.error(`[base-tables] ${table} after id ${afterId ?? '<start>'} failed:`, error);
       throw error;
     }
 
-    const batch = (data ?? []) as unknown as T[];
-    rows.push(...batch);
-    if (batch.length < PAGE_SIZE) break;
-  }
-
-  return rows;
+    return (data ?? []) as unknown as T[];
+  });
 }
 
 /** Fetch the base tables and reconstruct the leaderboard rows. */

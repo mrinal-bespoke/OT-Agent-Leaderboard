@@ -3,11 +3,10 @@ import { supabase } from "@db";
 import { benchmarkResults } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { fetchRawRowsFromBaseTables } from "./base-tables-source";
+import { fetchAllKeysetPages } from "./keyset-pagination";
+import { selectPool, selectResult, type EvalSelectionMode } from "./result-selection";
 
-export type EvalSelectionMode = 'oldest' | 'latest' | 'highest' | 'all';
-
-/** Rows per Supabase request. Kept at PostgREST's usual default max-rows. */
-const PAGE_SIZE = 1000;
+export type { EvalSelectionMode } from "./result-selection";
 
 /**
  * Fetch every row of a table/view in bounded pages.
@@ -30,41 +29,36 @@ const PAGE_SIZE = 1000;
  * ~59s full read is why callers go through the cache below rather than
  * invoking this per request.
  *
- * `orderColumn` must be unique. Without a stable total order, rows can shift
- * between requests and pages will overlap or skip.
+ * `orderColumn` must be a stored unique key. The deployed leaderboard_results
+ * view does not currently meet that contract, so production defaults to the
+ * base-table source below. View mode is safe only after its SQL uses
+ * sandbox_jobs.id.
  */
-async function fetchAllPaged<T>(
+async function fetchAllPaged<T extends { id: string }>(
   table: string,
   columns: string,
   orderColumn: string,
 ): Promise<T[]> {
-  const fetchPage = async (from: number): Promise<T[]> => {
-    const { data, error } = await supabase
+  return fetchAllKeysetPages<T>(async (afterId, limit) => {
+    let query = supabase
       .from(table)
       .select(columns)
       .order(orderColumn, { ascending: true })
-      .range(from, from + PAGE_SIZE - 1);
+      .limit(limit);
+
+    if (afterId !== null) {
+      query = query.gt(orderColumn, afterId);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
-      console.error(`Error fetching ${table} rows ${from}-${from + PAGE_SIZE - 1}:`, error);
+      console.error(`Error fetching ${table} after ${orderColumn} ${afterId ?? '<start>'}:`, error);
       throw error;
     }
 
     return (data ?? []) as unknown as T[];
-  };
-
-  // No up-front count: `count: 'exact'` has to compute the whole view and
-  // times out exactly like the unbounded select it replaced. Instead read
-  // until a page comes back short, which can only happen at the end.
-  const rows: T[] = [];
-
-  for (let from = 0; ; from += PAGE_SIZE) {
-    const batch = await fetchPage(from);
-    rows.push(...batch);
-    if (batch.length < PAGE_SIZE) break;
-  }
-
-  return rows;
+  });
 }
 
 export interface BenchmarkResultExtended extends BenchmarkResult {
@@ -179,69 +173,6 @@ interface RawLeaderboardRow {
   notes: string | null;
 }
 
-const JOB_STATUS_PRIORITY: Record<string, number> = {
-  'Finished': 0,
-  'Started': 1,
-  'Pending': 2,
-};
-
-/**
- * Select one result from a pool of results based on the eval selection mode.
- * Priority: Finished > Started > Pending. Among Finished results:
- * - Non-overlong results are preferred over overlong (partial) results
- * - oldest: prefer accuracy > 1% → then earliest timestamp
- * - latest: prefer accuracy > 1% → then latest timestamp
- * - highest: highest accuracy (no threshold)
- * Among non-Finished results (no accuracy): prefer Started over Pending, then latest timestamp.
- */
-function selectResult(pool: RawLeaderboardRow[], mode: EvalSelectionMode): RawLeaderboardRow | null {
-  if (pool.length === 0) return null;
-
-  // Separate usable results (Finished with accuracy) from non-usable (Pending/Started/Failed)
-  const finished = pool.filter(r => r.accuracy !== null && r.job_status !== 'Failed');
-  const nonFinished = pool.filter(r => r.accuracy === null || r.job_status === 'Failed');
-
-  // If we have any Finished results, prefer non-overlong over overlong
-  if (finished.length > 0) {
-    const nonOverlong = finished.filter(r => !r.is_overlong);
-    const candidates_pool = nonOverlong.length > 0 ? nonOverlong : finished;
-
-    if (mode === 'highest') {
-      let best = candidates_pool[0];
-      for (const row of candidates_pool) {
-        if ((row.accuracy ?? 0) > (best.accuracy ?? 0)) {
-          best = row;
-        }
-      }
-      return best;
-    }
-
-    // For oldest/latest: prefer results with accuracy > 1%, then sort by timestamp
-    const aboveThreshold = candidates_pool.filter(r => (r.accuracy ?? 0) > 1.0);
-    const candidates = aboveThreshold.length > 0 ? aboveThreshold : candidates_pool;
-
-    const sorted = [...candidates].sort((a, b) => {
-      const tsA = a.ended_at ? new Date(a.ended_at).getTime() : 0;
-      const tsB = b.ended_at ? new Date(b.ended_at).getTime() : 0;
-      return mode === 'oldest' ? tsA - tsB : tsB - tsA;
-    });
-
-    return sorted[0];
-  }
-
-  // No Finished results — pick best non-Finished: Started > Pending, then latest timestamp
-  const sorted = [...nonFinished].sort((a, b) => {
-    const aPri = JOB_STATUS_PRIORITY[a.job_status ?? 'Pending'] ?? 3;
-    const bPri = JOB_STATUS_PRIORITY[b.job_status ?? 'Pending'] ?? 3;
-    if (aPri !== bPri) return aPri - bPri;
-    const tsA = a.ended_at ? new Date(a.ended_at).getTime() : 0;
-    const tsB = b.ended_at ? new Date(b.ended_at).getTime() : 0;
-    return tsB - tsA; // latest first
-  });
-
-  return sorted[0];
-}
-
 function formatTimestampField(ts: string | null): string | undefined {
   if (!ts) return undefined;
   const d = new Date(ts);
@@ -278,7 +209,7 @@ export interface IStorage {
  * Once create_leaderboard_view.sql is applied, set this back to `view` and
  * remove base-tables-source.ts.
  */
-const LEADERBOARD_DATA_SOURCE = process.env.LEADERBOARD_DATA_SOURCE === 'base_tables' ? 'base_tables' : 'view';
+const LEADERBOARD_DATA_SOURCE = process.env.LEADERBOARD_DATA_SOURCE === 'view' ? 'view' : 'base_tables';
 
 /** How long cached raw rows are served before a refresh is triggered. */
 const RAW_ROWS_TTL_MS = 5 * 60 * 1000;
@@ -441,20 +372,13 @@ export class DbStorage implements IStorage {
     type SelectedRow = RawLeaderboardRow & { resolvedAccuracy: number | undefined; poolIndex?: number; poolSize?: number };
     const selectedRows: SelectedRow[] = [];
     for (const pool of Array.from(index.values())) {
-      if (mode === 'all') {
-        // Sort purely by submission time, descending (latest first)
-        const sorted = [...pool].sort((a, b) => {
-          const tsA = a.ended_at ? new Date(a.ended_at).getTime() : 0;
-          const tsB = b.ended_at ? new Date(b.ended_at).getTime() : 0;
-          return tsB - tsA;
+      for (const { row, poolIndex, poolSize } of selectPool(pool, mode)) {
+        selectedRows.push({
+          ...row,
+          resolvedAccuracy: row.accuracy ?? undefined,
+          poolIndex,
+          poolSize,
         });
-        sorted.forEach((row, idx) => {
-          selectedRows.push({ ...row, resolvedAccuracy: row.accuracy ?? undefined, poolIndex: idx, poolSize: sorted.length });
-        });
-      } else {
-        const selected = selectResult(pool, mode);
-        if (!selected) continue;
-        selectedRows.push({ ...selected, resolvedAccuracy: selected.accuracy ?? undefined });
       }
     }
 
