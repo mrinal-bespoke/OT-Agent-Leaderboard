@@ -37,6 +37,10 @@ export const BENCHMARK_FAMILIES: Record<Exclude<BenchmarkFamily, 'agentic'>, rea
     'triviaqa',
     'nq_open',
     'drop',
+    // Registered by the evalchemy harness alongside the lm-eval tasks.
+    // Its headline `accuracy` is prompt-level STRICT; the loose and
+    // instruction-level variants ride along in the job's metrics array.
+    'IFEval',
   ],
 } as const;
 

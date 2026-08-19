@@ -285,3 +285,61 @@ test('parseFamily defaults to agentic for junk input', () => {
     assert.equal(parseFamily(junk), 'agentic');
   }
 });
+
+test('the Snowball standard-eval benchmarks route to their real tabs', () => {
+  // Regression: IFEval was missing from the NLP list, and because `agentic` is
+  // defined by EXCLUSION it silently landed on the Agentic board next to
+  // SWE-bench and terminal_bench_2 rather than showing as absent. Exact names
+  // as registered by the evalchemy harness -- 'IFEval', not 'ifeval'.
+  assert.equal(inFamily('IFEval', 'nlp'), true);
+  assert.equal(inFamily('IFEval', 'agentic'), false, 'IFEval must not fall through to Agentic');
+  assert.equal(inFamily('IFEval', 'math'), false);
+
+  assert.equal(inFamily('MATH500', 'math'), true);
+  assert.equal(inFamily('MATH500', 'agentic'), false, 'MATH500 must not fall through to Agentic');
+  assert.equal(inFamily('MATH500', 'nlp'), false);
+});
+
+test('a Snowball model with one math and one nlp row appears on both tabs, once each', () => {
+  // Mirrors the two real rows for
+  // laion/sft-repro-thinking-step630-nemotron-terminal-step1888:
+  // MATH500 71.0% and IFEval 32.7172% (prompt-level strict), both via evalchemy.
+  const { rows } = buildRawRows(
+    [
+      job('math-row', { benchmark_id: 'b-math', metrics: [{ name: 'accuracy', value: 0.71 }] }),
+      job('ifeval-row', {
+        benchmark_id: 'b-ifeval',
+        metrics: [
+          { name: 'accuracy', value: 0.32717190388170053 },
+          { name: 'accuracy_stderr', value: 0.020190318966906255 },
+          { name: 'prompt_level_strict_acc', value: 0.32717190388170053 },
+          { name: 'inst_level_strict_acc', value: 0.4556354916067146 },
+          { name: 'prompt_level_loose_acc', value: 0.36968576709796674 },
+          { name: 'inst_level_loose_acc', value: 0.4940047961630695 },
+        ],
+      }),
+    ],
+    [model('m1', 'laion/sft-repro-thinking-step630-nemotron-terminal-step1888')],
+    [agent('a1', 'evalchemy')],
+    [bench('b-math', 'MATH500'), bench('b-ifeval', 'IFEval')],
+  );
+
+  const byBenchmark = new Map(rows.map((r) => [r.canonical_benchmark_name, r]));
+  assert.equal(rows.length, 2, 'both rows survive the base_tables reconstruction');
+
+  const math = byBenchmark.get('MATH500')!;
+  assert.ok(Math.abs(math.accuracy! - 71.0) < 1e-9);
+  assert.equal(inFamily(math.canonical_benchmark_name, 'math'), true);
+
+  const ifeval = byBenchmark.get('IFEval')!;
+  // The headline stays PROMPT-LEVEL STRICT: `accuracy` equals
+  // prompt_level_strict_acc, not the higher loose or instruction-level figures.
+  assert.ok(Math.abs(ifeval.accuracy! - 32.717190388170053) < 1e-9);
+  assert.ok(Math.abs(ifeval.standard_error! - 2.0190318966906255) < 1e-9);
+  assert.ok(ifeval.accuracy! < 36.9, 'must not pick up prompt_level_loose_acc');
+  assert.ok(ifeval.accuracy! < 45.5, 'must not pick up inst_level_strict_acc');
+  assert.equal(inFamily(ifeval.canonical_benchmark_name, 'nlp'), true);
+
+  // Neither belongs on the agentic board.
+  assert.equal(rows.filter((r) => inFamily(r.canonical_benchmark_name, 'agentic')).length, 0);
+});
