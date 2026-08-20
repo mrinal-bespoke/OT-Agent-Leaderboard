@@ -1,7 +1,8 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage, type EvalSelectionMode } from "./storage";
-import { parseFamily } from "@shared/benchmark-families";
+import { familyToTrack, parseFamily } from "@shared/benchmark-families";
+import { parseCapability, parseTrack } from "@shared/benchmark-registry";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Get all benchmark results
@@ -97,10 +98,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
         : 'oldest';
 
       const hideNoTraceLink = req.query.hideNoTraceLink === 'true';
-      // Which leaderboard tab: agentic (default), math or nlp. Defaulting to
-      // agentic keeps every existing caller byte-identical.
-      const family = parseFamily(req.query.family);
-      const results = await storage.getAllBenchmarkResultsWithImprovement(mode, hideNoTraceLink, family);
+
+      // Scope: track (+ optional capability). Defaults to the whole agentic
+      // track, which is what every existing caller already receives.
+      //
+      // `family` is the superseded spelling and is still honoured for one
+      // release so saved links keep working; an explicit `track` wins.
+      const scope = req.query.track !== undefined
+        ? (() => {
+            const track = parseTrack(req.query.track);
+            return { track, capability: parseCapability(req.query.capability, track) };
+          })()
+        : (() => {
+            const { track, capabilities } = familyToTrack(parseFamily(req.query.family));
+            // A legacy family can span capabilities (nlp = knowledge +
+            // instruction); passing none means the whole track, so only narrow
+            // when the family maps to exactly one.
+            return { track, capability: capabilities?.length === 1 ? capabilities[0] : undefined };
+          })();
+
+      const results = await storage.getAllBenchmarkResultsWithImprovement(mode, hideNoTraceLink, scope);
 
       // Group by (model, agent) combination
       const groupedData = new Map<string, {
@@ -369,7 +386,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Deliberately NOT applied to agentic: that board shows models with no
       // eval on purpose (the isNoEval flag and the "Missing Eval" tab depend on
       // them), so filtering there would remove a feature.
-      if (family !== 'agentic') {
+      if (scope.track !== 'agentic') {
         pivotedData = pivotedData.filter(row => Object.keys(row.benchmarks || {}).length > 0);
       }
 

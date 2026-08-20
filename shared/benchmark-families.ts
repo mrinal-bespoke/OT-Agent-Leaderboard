@@ -1,66 +1,53 @@
 /**
- * Which benchmarks belong to which leaderboard tab.
+ * Backwards-compatible `family` shim over the benchmark registry.
  *
- * Families come from the Marin Eval Policy (marin-community/marin#7958), which
- * defines three report templates:
+ * `family` (agentic | math | nlp) was the first cut at this and is now
+ * superseded by `track` + `capability` in shared/benchmark-registry.ts. It is
+ * kept working for one release so saved links and the current client keep
+ * functioning, then removed.
  *
- *   Agentic : model | SWE-100 | dev_set_v2 | tb2 | ID mean | ID SE | traces
- *   Math    : scale | mix | stage | model | MATH500 | AIME24(mean/std) | gsm8k
- *   NLP     : model | params | MMLU | HellaSwag | ARC-c/e | PIQA | WinoGrande
- *             | OBQA | BoolQ | TruthfulQA | LAMBADA | TriviaQA | NQ | DROP
- *
- * Membership is by CANONICAL benchmark name, matching how duplicate benchmark
- * rows are already resolved before rows reach the UI.
- *
- * Names must match what is REGISTERED in the database, not the policy's prose.
- * The agentic set already carries four spellings of one benchmark
- * (terminal_bench_2, terminal-bench-2.0, terminal-bench@2.0, terminal_bench_v2)
- * plus raw SHAs, so anything importing standard evals should register under the
- * exact strings below rather than inventing a new spelling.
+ * The important change is underneath: `agentic` used to mean "not in the math
+ * or nlp allowlist", which silently swept every unregistered benchmark onto the
+ * agentic board. It now means "registered as agentic", and an unknown name
+ * belongs to no family at all.
  */
+
+import {
+  capabilityOf,
+  trackOf,
+  type Capability,
+  type Track,
+} from './benchmark-registry';
 
 export type BenchmarkFamily = 'agentic' | 'math' | 'nlp';
 
-export const BENCHMARK_FAMILIES: Record<Exclude<BenchmarkFamily, 'agentic'>, readonly string[]> = {
-  math: ['MATH500', 'AIME24', 'gsm8k'],
-  nlp: [
-    'mmlu',
-    'hellaswag',
-    'arc_challenge',
-    'arc_easy',
-    'piqa',
-    'winogrande',
-    'openbookqa',
-    'boolq',
-    'truthfulqa_mc2',
-    'lambada_openai',
-    'triviaqa',
-    'nq_open',
-    'drop',
-    // Registered by the evalchemy harness alongside the lm-eval tasks.
-    // Its headline `accuracy` is prompt-level STRICT; the loose and
-    // instruction-level variants ride along in the job's metrics array.
-    'IFEval',
-  ],
-} as const;
-
-const MATH = new Set<string>(BENCHMARK_FAMILIES.math);
-const NLP = new Set<string>(BENCHMARK_FAMILIES.nlp);
+/** How a legacy family maps onto the registry's track/capability pair. */
+export function familyToTrack(family: BenchmarkFamily): {
+  track: Track;
+  capabilities?: readonly Capability[];
+} {
+  if (family === 'math') return { track: 'non-agentic', capabilities: ['math'] };
+  if (family === 'nlp') {
+    // The old `nlp` list was the lm-eval tasks plus IFEval, which the registry
+    // now splits across knowledge and instruction. Map to both so an existing
+    // ?family=nlp link keeps returning what it returned before.
+    return { track: 'non-agentic', capabilities: ['knowledge', 'instruction'] };
+  }
+  return { track: 'agentic' };
+}
 
 /**
- * True when a benchmark belongs to the given tab.
+ * Whether a benchmark belongs to a legacy family.
  *
- * `agentic` is defined by EXCLUSION -- anything not claimed by a standard
- * family. That keeps the historical agentic set (101 benchmarks, many with
- * generated names) working without enumerating it, and means a newly added
- * agentic benchmark shows up automatically instead of silently vanishing.
- * The cost is that an unregistered standard benchmark lands in the agentic tab;
- * add it to the lists above rather than special-casing it.
+ * NOTE the change in meaning for 'agentic': this is now registry membership,
+ * not "everything left over". An unregistered benchmark returns false for every
+ * family, including agentic.
  */
 export function inFamily(canonicalBenchmarkName: string, family: BenchmarkFamily): boolean {
-  if (family === 'math') return MATH.has(canonicalBenchmarkName);
-  if (family === 'nlp') return NLP.has(canonicalBenchmarkName);
-  return !MATH.has(canonicalBenchmarkName) && !NLP.has(canonicalBenchmarkName);
+  const { track, capabilities } = familyToTrack(family);
+  if (trackOf(canonicalBenchmarkName) !== track) return false;
+  if (!capabilities) return true;
+  return capabilities.includes(capabilityOf(canonicalBenchmarkName));
 }
 
 export function parseFamily(value: unknown): BenchmarkFamily {

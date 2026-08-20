@@ -4,6 +4,7 @@ import { benchmarkResults } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { fetchRawRowsFromBaseTables } from "./base-tables-source";
 import { inFamily, type BenchmarkFamily } from "@shared/benchmark-families";
+import { capabilityOf, inTrack, type Capability, type Track } from "@shared/benchmark-registry";
 
 export type EvalSelectionMode = 'oldest' | 'latest' | 'highest' | 'all';
 
@@ -427,13 +428,24 @@ export class DbStorage implements IStorage {
     return result;
   }
 
-  async getAllBenchmarkResultsWithImprovement(mode: EvalSelectionMode = 'oldest', hideNoTraceLink: boolean = false, family: BenchmarkFamily = 'agentic'): Promise<BenchmarkResultWithImprovement[]> {
+  async getAllBenchmarkResultsWithImprovement(
+    mode: EvalSelectionMode = 'oldest',
+    hideNoTraceLink: boolean = false,
+    scope: { track: Track; capability?: Capability } = { track: 'agentic' },
+  ): Promise<BenchmarkResultWithImprovement[]> {
     let allRows = await this.fetchAllRawRows();
 
-    // Restrict to one tab's benchmarks BEFORE pools are built, so selection,
-    // dedup and improvement are all computed within the family. Filtering
-    // afterwards would let a math result win an agentic group and disappear.
-    allRows = allRows.filter(row => inFamily(row.canonical_benchmark_name, family));
+    // Restrict to the visible benchmark set BEFORE pools are built, so
+    // selection, dedup and improvement are all computed within it. Filtering
+    // afterwards would let an out-of-scope result win a group and then vanish.
+    //
+    // Track membership comes from the registry, so an unregistered benchmark is
+    // 'unclassified' and appears on no curated board -- rather than silently
+    // defaulting onto the agentic one, which is the bug this replaces.
+    allRows = allRows.filter(row => inTrack(row.canonical_benchmark_name, scope.track));
+    if (scope.capability) {
+      allRows = allRows.filter(row => capabilityOf(row.canonical_benchmark_name) === scope.capability);
+    }
 
     // Filter out rows without trace links before pool building
     if (hideNoTraceLink) {

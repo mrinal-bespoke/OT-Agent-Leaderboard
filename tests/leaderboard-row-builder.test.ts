@@ -264,18 +264,22 @@ test('math and nlp benchmarks route to their own families', () => {
   }
 });
 
-test('agentic is defined by exclusion, so new agentic benchmarks appear automatically', () => {
-  for (const b of ['terminal_bench_2', 'dev_set_v2', 'swebench-verified', 'some-brand-new-agentic-set']) {
+test('registered agentic benchmarks are agentic; unregistered ones are not', () => {
+  // Superseded the exclusion rule: membership is enumerated in the registry, so
+  // a brand-new name is unclassified rather than silently agentic.
+  for (const b of ['terminal_bench_2', 'dev_set_v2', 'swebench-verified']) {
     assert.equal(inFamily(b, 'agentic'), true, `${b} should be agentic`);
     assert.equal(inFamily(b, 'math'), false);
   }
+  assert.equal(inFamily('some-brand-new-agentic-set', 'agentic'), false,
+    'unregistered names no longer fall through to agentic');
 });
 
-test('an unregistered standard benchmark falls into agentic, not nowhere', () => {
-  // Documents the known trade-off: a misspelled standard benchmark is visible
-  // in the wrong tab rather than silently invisible everywhere.
-  assert.equal(inFamily('MATH-500', 'math'), false, 'wrong spelling is not math');
-  assert.equal(inFamily('MATH-500', 'agentic'), true, 'but it still shows up somewhere');
+test('a misspelled standard benchmark belongs to no family at all', () => {
+  // Previously it landed on the agentic board. Now it is invisible on both and
+  // shows up in the unclassified audit instead -- see benchmark-registry.test.ts.
+  assert.equal(inFamily('MATH-500', 'math'), false);
+  assert.equal(inFamily('MATH-500', 'agentic'), false);
 });
 
 test('parseFamily defaults to agentic for junk input', () => {
