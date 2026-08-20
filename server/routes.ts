@@ -2,7 +2,12 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage, type EvalSelectionMode } from "./storage";
 import { familyToTrack, parseFamily } from "@shared/benchmark-families";
-import { parseCapability, parseTrack } from "@shared/benchmark-registry";
+import {
+  BENCHMARK_REGISTRY,
+  capabilitiesOf,
+  parseCapability,
+  parseTrack,
+} from "@shared/benchmark-registry";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Get all benchmark results
@@ -88,6 +93,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Get pivoted leaderboard data with improvement metrics
+  /**
+   * Columns a track/capability SHOULD show, from the registry.
+   *
+   * Deliberately independent of the data: a capability with no results yet
+   * still returns its benchmarks, so the table renders empty columns and the
+   * missing coverage is visible. Deriving columns from the rows instead would
+   * make an unevaluated capability indistinguishable from one that does not
+   * exist.
+   *
+   * The registry stays server-side so there is exactly one source of truth for
+   * membership; the client renders what this returns.
+   */
+  app.get("/api/benchmark-columns", (req, res) => {
+    const track = parseTrack(req.query.track);
+    const capability = parseCapability(req.query.capability, track);
+
+    // Overview: one representative benchmark per capability (lowest order in
+    // each), so every policy capability is present including the empty ones.
+    if (track === 'non-agentic' && req.query.capability === 'overview') {
+      const byCapability = new Map<string, typeof BENCHMARK_REGISTRY[number]>();
+      for (const e of BENCHMARK_REGISTRY) {
+        if (e.track !== track) continue;
+        const held = byCapability.get(e.capability);
+        if (!held || e.order < held.order) byCapability.set(e.capability, e);
+      }
+      const ordered = capabilitiesOf(track)
+        .map(c => byCapability.get(c))
+        .filter((e): e is typeof BENCHMARK_REGISTRY[number] => Boolean(e));
+      return res.json(ordered.map(e => ({
+        canonicalName: e.canonicalName,
+        displayName: e.displayName,
+        capability: e.capability,
+      })));
+    }
+
+    const entries = BENCHMARK_REGISTRY
+      .filter(e => e.track === track && (!capability || e.capability === capability))
+      .sort((a, b) => a.order - b.order);
+
+    res.json(entries.map(e => ({
+      canonicalName: e.canonicalName,
+      displayName: e.displayName,
+      capability: e.capability,
+    })));
+  });
+
   app.get("/api/leaderboard-pivoted-with-improvement", async (req, res) => {
     try {
       // Validate and parse eval selection mode

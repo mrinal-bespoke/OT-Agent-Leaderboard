@@ -165,3 +165,41 @@ test('legacy ?family= still resolves the same benchmarks', () => {
   assert.equal(inFamily('brand-new-thing', 'agentic'), false);
   assert.equal(parseFamily('nonsense'), 'agentic');
 });
+
+// --- V2: capability views and column sets ---
+
+test('overview covers every non-agentic capability, including empty ones', () => {
+  // The point of driving columns from the registry rather than the data: a
+  // capability nobody has evaluated must still be visible as an empty column.
+  const byCapability = new Map<string, (typeof BENCHMARK_REGISTRY)[number]>();
+  for (const e of BENCHMARK_REGISTRY) {
+    if (e.track !== 'non-agentic') continue;
+    const held = byCapability.get(e.capability);
+    if (!held || e.order < held.order) byCapability.set(e.capability, e);
+  }
+  const caps = capabilitiesOf('non-agentic');
+  assert.deepEqual(
+    caps.map(c => byCapability.get(c)?.canonicalName),
+    ['MATH500', 'HumanEvalPlus', 'MMLU-Pro', 'IFEval', 'MRCR', 'FinanceBench'],
+    'one representative per capability, in registry order',
+  );
+  // Only two of these have any rows today; the other four must still be listed.
+  assert.equal(caps.length, 6);
+});
+
+test('every non-agentic capability has at least one registered benchmark', () => {
+  // An empty capability would render a view with no columns at all, which
+  // looks broken rather than unevaluated.
+  for (const c of capabilitiesOf('non-agentic')) {
+    const n = BENCHMARK_REGISTRY.filter(e => e.track === 'non-agentic' && e.capability === c).length;
+    assert.ok(n > 0, `capability ${c} has no benchmarks`);
+  }
+});
+
+test('agentic capability views do not leak non-agentic benchmarks', () => {
+  for (const c of capabilitiesOf('agentic')) {
+    for (const e of BENCHMARK_REGISTRY.filter(x => x.capability === c)) {
+      assert.equal(e.track, 'agentic', `${e.canonicalName} in agentic view ${c}`);
+    }
+  }
+});

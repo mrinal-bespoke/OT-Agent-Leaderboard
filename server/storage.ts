@@ -69,7 +69,16 @@ async function fetchAllPaged<T>(
   return rows;
 }
 
-export interface BenchmarkResultExtended extends BenchmarkResult {
+export interface BenchmarkResultExtended extends Omit<BenchmarkResult, 'standardError'> {
+  /**
+   * Widened past the inherited `notNull()` on the dead legacy Drizzle table.
+   *
+   * A benchmark that reports no standard error must render no ± at all. It
+   * previously defaulted to 0, which displays as `±0.00` and asserts perfect
+   * precision -- MATH500 reports `accuracy` with no `accuracy_stderr` and was
+   * claiming exactly that.
+   */
+  standardError: number | null;
   hfTracesLink?: string;
   endedAt?: string;
 }
@@ -381,7 +390,7 @@ export class DbStorage implements IStorage {
         agentName: selected.canonical_agent_name ?? selected.agent_name,
         benchmarkName: selected.benchmark_name,
         accuracy: selected.accuracy ?? 0,
-        standardError: selected.standard_error ?? 0,
+        standardError: selected.standard_error ?? null,
         hfTracesLink: selected.hf_traces_link ?? undefined,
         endedAt: formatTimestampField(selected.ended_at),
       });
@@ -601,7 +610,7 @@ export class DbStorage implements IStorage {
         agentName: selected.canonical_agent_name ?? selected.agent_name,
         benchmarkName: selected.benchmark_name,
         accuracy: selected.accuracy ?? 0,
-        standardError: selected.standard_error ?? 0,
+        standardError: selected.standard_error ?? null,
         hfTracesLink: selected.hf_traces_link ?? undefined,
         endedAt: formatTimestampField(selected.ended_at),
         modelId: selected.model_id,

@@ -16,16 +16,27 @@ import { DEFAULT_VISIBLE_BENCHMARKS, OOD_BENCHMARKS, CORE_BENCHMARKS, compareBen
 import { BLACKLISTED_MODELS } from '@/config/blacklistedModels';
 
 /**
- * Mirrors BenchmarkFamily in shared/benchmark-families.ts, which is the source
- * of truth for family membership.
+ * Track and capability identifiers, mirroring shared/benchmark-registry.ts.
  *
- * Declared locally rather than imported: Vite runs with root=client/ and
- * fs.strict, and no client module has ever imported from @shared, so pulling a
- * module in from outside the root is a resolution risk for a bare string union
- * that costs nothing to restate. The server still owns which benchmarks belong
- * to which family -- this is only the tab identifier sent as a query param.
+ * Declared locally rather than imported: the server owns which benchmarks
+ * belong where, and the client only needs the identifiers it puts in a query
+ * param. Column contents come from /api/benchmark-columns, so there is still
+ * exactly one source of truth for membership.
  */
-type BenchmarkFamily = 'agentic' | 'math' | 'nlp';
+type Track = 'agentic' | 'non-agentic';
+
+/** Capability views inside the non-agentic track, in display order. */
+const NON_AGENTIC_VIEWS = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'math', label: 'Math' },
+  { id: 'code', label: 'Code' },
+  { id: 'knowledge', label: 'Knowledge' },
+  { id: 'instruction', label: 'Instruction' },
+  { id: 'longcontext', label: 'Long context' },
+  { id: 'domain', label: 'Domain' },
+] as const;
+
+type NonAgenticView = typeof NON_AGENTIC_VIEWS[number]['id'];
 
 type EvalSelectionMode = 'oldest' | 'latest' | 'highest' | 'all';
 
@@ -227,11 +238,12 @@ const SCALING_SECTION_BY_MODEL: Record<string, string> = SCALING_SECTIONS.reduce
 
 export default function Leaderboard() {
   const [selectionMode, setSelectionMode] = useState<EvalSelectionMode>('all');
-  // Which report template is shown: agentic (default), math or nlp. The server
-  // filters by family BEFORE dedup, so switching this re-fetches rather than
-  // filtering client-side -- selection and improvement must be computed within
-  // the family, not across it.
-  const [family, setFamily] = useState<BenchmarkFamily>('agentic');
+  // Evaluation track, and the capability view within the non-agentic track.
+  // The server filters by track BEFORE dedup, so switching re-fetches rather
+  // than filtering client-side: selection, dedup and improvement must all be
+  // computed within the visible set, not across it.
+  const [track, setTrack] = useState<Track>('agentic');
+  const [nonAgenticView, setNonAgenticView] = useState<NonAgenticView>('overview');
   const [activeTab, setActiveTab] = useState<'filtered' | 'all' | 'blacklisted' | 'base' | 'active' | 'a1' | 'b1' | 'c1' | 'd1' | 'e1' | 'f1' | 'g1' | 'ood' | 'war' | 'table1' | 'scaling' | 'rl8b' | 'baselineData' | 'missingEval' | 'guardrail'>('all');
   const [topN, setTopN] = useState<number>(50);
   const [recentlyAddedN, setRecentlyAddedN] = useState<number>(50);
@@ -258,8 +270,25 @@ export default function Leaderboard() {
 
   // Always fetch improvement metrics data (query key includes mode for per-mode caching)
   const { data: pivotedData = [], isLoading, isFetching, refetch } = useQuery<PivotedLeaderboardRowWithImprovement[]>({
-    queryKey: [`/api/leaderboard-pivoted-with-improvement?mode=${selectionMode}&hideNoTraceLink=${hideNoTraceLink}&family=${family}`],
+    queryKey: [
+      `/api/leaderboard-pivoted-with-improvement?mode=${selectionMode}&hideNoTraceLink=${hideNoTraceLink}` +
+      `&track=${track}` +
+      (track === 'non-agentic' && nonAgenticView !== 'overview' ? `&capability=${nonAgenticView}` : ''),
+    ],
   });
+
+  // Columns the selected non-agentic view SHOULD show, straight from the
+  // registry rather than from the data -- so a capability nobody has evaluated
+  // renders as an empty column instead of silently not existing.
+  const { data: registryColumns = [] } = useQuery<{ canonicalName: string; displayName: string; capability: string }[]>({
+    queryKey: [`/api/benchmark-columns?track=${track}&capability=${nonAgenticView}`],
+    enabled: track === 'non-agentic',
+  });
+
+  const forcedBenchmarks = useMemo(
+    () => (track === 'non-agentic' ? registryColumns.map(c => c.canonicalName) : undefined),
+    [track, registryColumns],
+  );
 
   const handleRefresh = () => {
     refetch();
@@ -515,24 +544,27 @@ export default function Leaderboard() {
   // so the column choice has to be made again.
   useEffect(() => {
     hasInitializedBenchmarks.current = false;
-  }, [family]);
+  }, [track, nonAgenticView]);
 
   useEffect(() => {
     if (pivotedData.length > 0 && !hasInitializedBenchmarks.current) {
       hasInitializedBenchmarks.current = true;
+      // Non-agentic takes its columns from the registry, including capabilities
+      // with no results. Agentic keeps the existing core-set default exactly.
+      if (track === 'non-agentic') {
+        if (forcedBenchmarks && forcedBenchmarks.length > 0) {
+          setSelectedBenchmarks(forcedBenchmarks);
+        }
+        return;
+      }
       const validDefaults = DEFAULT_VISIBLE_BENCHMARKS.filter(benchmark =>
         availableBenchmarks.includes(benchmark)
       );
-      // DEFAULT_VISIBLE_BENCHMARKS is the agentic core set, so on the Math and
-      // NLP tabs nothing matches and no columns would ever be selected -- rows
-      // render with a model name and no scores. Fall back to whatever the tab
-      // actually returned.
-      const nextBenchmarks = validDefaults.length > 0 ? validDefaults : availableBenchmarks;
-      if (nextBenchmarks.length > 0) {
-        setSelectedBenchmarks(nextBenchmarks);
+      if (validDefaults.length > 0) {
+        setSelectedBenchmarks(validDefaults);
       }
     }
-  }, [pivotedData, availableBenchmarks, family]);
+  }, [pivotedData, availableBenchmarks, track, nonAgenticView, forcedBenchmarks]);
 
   const handleClearFilters = () => {
     setSelectedModels([]);
@@ -551,12 +583,13 @@ export default function Leaderboard() {
     setSelectedBaseModels([]);
     setSelectedTrainingTypes([]);
     setSelectedModelSizes([]);
-    const validDefaults = DEFAULT_VISIBLE_BENCHMARKS.filter(benchmark =>
-      availableBenchmarks.includes(benchmark)
+    if (track === 'non-agentic') {
+      setSelectedBenchmarks(forcedBenchmarks ?? []);
+      return;
+    }
+    setSelectedBenchmarks(
+      DEFAULT_VISIBLE_BENCHMARKS.filter(benchmark => availableBenchmarks.includes(benchmark)),
     );
-    // Same fallback as the initial load: on Math/NLP the agentic defaults match
-    // nothing, and resetting to an empty set would blank every score column.
-    setSelectedBenchmarks(validDefaults.length > 0 ? validDefaults : availableBenchmarks);
   };
 
   if (isLoading) {
@@ -600,28 +633,44 @@ export default function Leaderboard() {
       </header>
 
       <main className="px-3 sm:px-6 lg:px-8 py-4 sm:py-8">
-        {/* Report template: Agentic / Math / NLP (Marin Eval Policy #7958) */}
-        <div className="flex flex-wrap items-center gap-2 sm:gap-4 mb-4">
-          <span className="text-sm font-medium text-foreground">Benchmarks:</span>
+        {/* Evaluation track, and capability view within non-agentic (#7958) */}
+        <div className="flex flex-wrap items-center gap-2 sm:gap-4 mb-3">
+          <span className="text-sm font-medium text-foreground">Track:</span>
           <ToggleGroup
             type="single"
-            value={family}
-            onValueChange={(value) => { if (value) setFamily(value as BenchmarkFamily); }}
+            value={track}
+            onValueChange={(value) => { if (value) setTrack(value as Track); }}
             variant="outline"
             size="sm"
           >
-            <ToggleGroupItem value="agentic" data-testid="family-agentic">Agentic</ToggleGroupItem>
-            <ToggleGroupItem value="math" data-testid="family-math">Math</ToggleGroupItem>
-            <ToggleGroupItem value="nlp" data-testid="family-nlp">NLP</ToggleGroupItem>
+            <ToggleGroupItem value="agentic" data-testid="track-agentic">Agentic</ToggleGroupItem>
+            <ToggleGroupItem value="non-agentic" data-testid="track-non-agentic">Non-agentic</ToggleGroupItem>
           </ToggleGroup>
           <span className="hidden sm:inline text-xs text-muted-foreground max-w-md">
-            {family === 'agentic'
-              ? 'SWE-bench, dev_set_v2, terminal_bench_2 and other agentic evals.'
-              : family === 'math'
-                ? 'MATH500, AIME24, gsm8k. Empty until non-agentic results are imported.'
-                : 'MMLU, HellaSwag, ARC, PIQA and the rest of the lm-eval suite. Empty until non-agentic results are imported.'}
+            {track === 'agentic'
+              ? 'Harbor agentic evals: SWE-bench, dev_set_v2, terminal_bench_2 and the rest.'
+              : 'Evalchemy and lm-eval results. Empty columns are capabilities with no results yet.'}
           </span>
         </div>
+
+        {track === 'non-agentic' && (
+          <div className="flex flex-wrap items-center gap-2 sm:gap-4 mb-4">
+            <span className="text-sm font-medium text-foreground">View:</span>
+            <ToggleGroup
+              type="single"
+              value={nonAgenticView}
+              onValueChange={(value) => { if (value) setNonAgenticView(value as NonAgenticView); }}
+              variant="outline"
+              size="sm"
+            >
+              {NON_AGENTIC_VIEWS.map(v => (
+                <ToggleGroupItem key={v.id} value={v.id} data-testid={`view-${v.id}`}>
+                  {v.label}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+          </div>
+        )}
 
         {/* Eval Selection Mode */}
         <div className="flex flex-wrap items-center gap-2 sm:gap-4 mb-4 sm:mb-6">
@@ -993,6 +1042,7 @@ export default function Leaderboard() {
                 trainingTypes: selectedTrainingTypes,
                 modelSizes: selectedModelSizes,
               }}
+              forcedBenchmarks={forcedBenchmarks}
               showDuplicateBenchmarks={showDuplicateBenchmarks}
               showDuplicateModels={showDuplicateModels}
               showDuplicateAgents={showDuplicateAgents}
@@ -1273,7 +1323,8 @@ export default function Leaderboard() {
                   trainingTypes: selectedTrainingTypes,
                   modelSizes: selectedModelSizes,
                 }}
-                showDuplicateBenchmarks={showDuplicateBenchmarks}
+                forcedBenchmarks={forcedBenchmarks}
+              showDuplicateBenchmarks={showDuplicateBenchmarks}
                 showDuplicateModels={showDuplicateModels}
                 showDuplicateAgents={showDuplicateAgents}
                 hideBlacklisted={hideBlacklisted}

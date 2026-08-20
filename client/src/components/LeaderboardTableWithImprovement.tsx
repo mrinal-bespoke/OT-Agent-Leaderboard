@@ -119,6 +119,12 @@ interface LeaderboardTableWithImprovementProps {
     trainingTypes: string[];
     modelSizes: string[];
   };
+  /**
+   * Benchmark columns to render even when no row has a result for them.
+   * Used by the non-agentic track so an unevaluated capability shows as an
+   * empty column rather than vanishing. Omit for the agentic track.
+   */
+  forcedBenchmarks?: string[];
   // Duplicate display controls
   showDuplicateBenchmarks: boolean;
   showDuplicateModels: boolean;
@@ -167,6 +173,7 @@ export default function LeaderboardTableWithImprovement({
   baseModelSearch,
   benchmarkSearch,
   filters,
+  forcedBenchmarks,
   showDuplicateBenchmarks,
   showDuplicateModels,
   showDuplicateAgents,
@@ -471,8 +478,27 @@ export default function LeaderboardTableWithImprovement({
     processedData.forEach(row => {
       Object.keys(row.benchmarks).forEach(benchmark => benchmarkSet.add(benchmark));
     });
-    return Array.from(benchmarkSet).sort(compareBenchmarks);
-  }, [processedData]);
+
+    // Columns that must render even with no rows behind them. Without this a
+    // capability nobody has evaluated yet is indistinguishable from one that
+    // does not exist, because columns are otherwise derived from the data.
+    // Absent (the agentic path) this is a no-op.
+    forcedBenchmarks?.forEach(benchmark => benchmarkSet.add(benchmark));
+
+    const names = Array.from(benchmarkSet);
+    if (forcedBenchmarks && forcedBenchmarks.length > 0) {
+      // Honour the caller's order (registry order); anything extra trails it.
+      const rank = new Map(forcedBenchmarks.map((b, i) => [b, i]));
+      return names.sort((a, b) => {
+        const ra = rank.get(a), rb = rank.get(b);
+        if (ra !== undefined && rb !== undefined) return ra - rb;
+        if (ra !== undefined) return -1;
+        if (rb !== undefined) return 1;
+        return compareBenchmarks(a, b);
+      });
+    }
+    return names.sort(compareBenchmarks);
+  }, [processedData, forcedBenchmarks]);
 
   // Filter which benchmark columns to show based on search, filters, and duplicate settings
   const visibleBenchmarks = useMemo(() => {
