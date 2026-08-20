@@ -510,17 +510,29 @@ export default function Leaderboard() {
 
   // Initialize selectedBenchmarks with defaults only on first data load
   const hasInitializedBenchmarks = useRef(false);
+
+  // Switching tab is a fresh data set with a different benchmark vocabulary,
+  // so the column choice has to be made again.
+  useEffect(() => {
+    hasInitializedBenchmarks.current = false;
+  }, [family]);
+
   useEffect(() => {
     if (pivotedData.length > 0 && !hasInitializedBenchmarks.current) {
       hasInitializedBenchmarks.current = true;
       const validDefaults = DEFAULT_VISIBLE_BENCHMARKS.filter(benchmark =>
         availableBenchmarks.includes(benchmark)
       );
-      if (validDefaults.length > 0) {
-        setSelectedBenchmarks(validDefaults);
+      // DEFAULT_VISIBLE_BENCHMARKS is the agentic core set, so on the Math and
+      // NLP tabs nothing matches and no columns would ever be selected -- rows
+      // render with a model name and no scores. Fall back to whatever the tab
+      // actually returned.
+      const nextBenchmarks = validDefaults.length > 0 ? validDefaults : availableBenchmarks;
+      if (nextBenchmarks.length > 0) {
+        setSelectedBenchmarks(nextBenchmarks);
       }
     }
-  }, [pivotedData, availableBenchmarks]);
+  }, [pivotedData, availableBenchmarks, family]);
 
   const handleClearFilters = () => {
     setSelectedModels([]);
@@ -542,7 +554,9 @@ export default function Leaderboard() {
     const validDefaults = DEFAULT_VISIBLE_BENCHMARKS.filter(benchmark =>
       availableBenchmarks.includes(benchmark)
     );
-    setSelectedBenchmarks(validDefaults);
+    // Same fallback as the initial load: on Math/NLP the agentic defaults match
+    // nothing, and resetting to an empty set would blank every score column.
+    setSelectedBenchmarks(validDefaults.length > 0 ? validDefaults : availableBenchmarks);
   };
 
   if (isLoading) {
